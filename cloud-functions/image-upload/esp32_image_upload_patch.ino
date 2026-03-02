@@ -1,25 +1,3 @@
-/*
- * ═══════════════════════════════════════════════════════════════════
- * ESP32-CAM — Direct-to-Cloud Image Upload (Base64)
- * ═══════════════════════════════════════════════════════════════════
- *
- * CHANGES from the original M3 firmware:
- *
- * 1. Added #include <WiFiClientSecure.h> and "mbedtls/base64.h"
- * 2. Added CLOUD_IMAGE_URL constant (new upload-image function URL)
- * 3. Replaced imageCycle() with a base64-encoding version that
- *    POSTs to the Cloud Function over HTTPS
- * 4. Uses ps_malloc() for the base64 buffer (needs PSRAM)
- *
- * HOW TO INTEGRATE:
- *   Copy the sections below into the existing firmware.
- *   See inline comments marked with ★ for where each piece goes.
- * ═══════════════════════════════════════════════════════════════════
- */
-
-// ★ ADD these two includes at the top of your firmware,
-//   alongside the existing #include <WiFi.h>, <HTTPClient.h>, etc.
-
 #include <WiFiClientSecure.h>        // HTTPS support
 #include "mbedtls/base64.h"          // Base64 encoding (built-in to ESP32)
 
@@ -29,13 +7,12 @@
 
 // Cloud Function for image upload (fill in after deployment)
 const char* CLOUD_IMAGE_URL = "https://upload-image-n6hvbwpdfq-el.a.run.app";
-//                             ↑ Replace with your actual URL from deploy.sh output
 
 // Warehouse ID — MUST match the value used in sendSensorData()
 const char* WAREHOUSE_ID = "wh001";
 
 
-// ★ REPLACE the entire imageCycle() function with this version:
+
 
 void imageCycle() {
   Serial.println("--- Image Capture (Base64 → Cloud) Start ---");
@@ -89,15 +66,9 @@ void imageCycle() {
     return;
   }
 
-  // ── 4. Build JSON and POST over HTTPS ─────────────────────────────
-  // JSON structure:  {"warehouse_id":"wh001","image":"<base64>"}
-  //
-  // We build the JSON manually to avoid ArduinoJson needing a huge
-  // DynamicJsonDocument. The base64 string can be 40-70 KB, so we
-  // stream-build the body.
-
+  
   WiFiClientSecure client;
-  client.setInsecure();  // Skip TLS cert verification (hackathon)
+  client.setInsecure();  // Skip TLS cert verification
   client.setTimeout(20);  // 20 second timeout
 
   HTTPClient http;
@@ -105,7 +76,7 @@ void imageCycle() {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(20000);  // 20s total timeout
 
-  // Build the JSON payload in a String (PSRAM-aware on ESP32)
+  // Build the JSON payload in a String
   String payload;
   payload.reserve(b64_out_len + 80);  // Pre-allocate to avoid reallocs
   payload = "{\"warehouse_id\":\"";
@@ -126,13 +97,13 @@ void imageCycle() {
 
   if (code == 200) {
     String response = http.getString();
-    Serial.println("  ✅ Image uploaded to cloud!");
+    Serial.println("  Image uploaded to cloud!");
     Serial.println("  Response: " + response);
   } else if (code > 0) {
-    Serial.printf("  ⚠ Upload returned HTTP %d\n", code);
+    Serial.printf("  Upload returned HTTP %d\n", code);
     Serial.println("  Body: " + http.getString());
   } else {
-    Serial.printf("  ❌ Upload failed: %s\n", http.errorToString(code).c_str());
+    Serial.printf("  Upload failed: %s\n", http.errorToString(code).c_str());
   }
 
   http.end();
