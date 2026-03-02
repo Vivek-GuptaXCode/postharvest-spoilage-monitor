@@ -1,0 +1,42 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Warehouses ──────────────────────────────────────────
+    match /warehouses/{warehouseId} {
+      // Authenticated users can read warehouse metadata
+      allow read: if request.auth != null;
+      // Only server (Cloud Functions) can write — they bypass rules
+      allow write: if false;
+
+      // Latest readings (real-time dashboard — written by M1's predict-spoilage)
+      match /latest/{docId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+
+      // Historical sensor readings (written by M1's predict-spoilage)
+      match /readings/{readingId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+
+      // ML predictions log (written by M1's predict-spoilage)
+      match /predictions/{predictionId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+
+      // Alerts — users can READ all, but only UPDATE the 'acknowledged' field
+      // This allows M4's Flutter app to acknowledge alerts directly from Firestore
+      // without going through M2's REST API (both paths work)
+      match /alerts/{alertId} {
+        allow read: if request.auth != null;
+        allow update: if request.auth != null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['acknowledged'])
+          && request.resource.data.acknowledged == true;
+        allow create, delete: if false;
+      }
+    }
+  }
+}

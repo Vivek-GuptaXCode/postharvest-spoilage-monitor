@@ -1,0 +1,7 @@
+pytest>=8.0
+requests>=2.31
+functions-framework>=3.5
+flask-cors>=4.0
+google-cloud-firestore>=2.16
+firebase-admin>=6.5
+twilio>=9.0

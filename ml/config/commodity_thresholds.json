@@ -1,0 +1,57 @@
+{
+  "tomato": {
+    "optimal_temp_min": 12, "optimal_temp_max": 15,
+    "optimal_rh_min": 85,  "optimal_rh_max": 95,
+    "shelf_life_days_optimal": 14,
+    "price_per_kg_inr": 30,
+    "recommendations": {
+      "temperature_high": "Activate cold-room ventilation. Tomatoes degrade rapidly above 20 °C.",
+      "humidity_low": "Increase relative humidity with wet-burlap or misting. Target 85–95 % RH.",
+      "gas_spike": "Separate ethylene-producing items. Ventilate to reduce VOC concentration."
+    }
+  },
+  "potato": {
+    "optimal_temp_min": 4, "optimal_temp_max": 5,
+    "optimal_rh_min": 95,  "optimal_rh_max": 98,
+    "shelf_life_days_optimal": 180,
+    "price_per_kg_inr": 20,
+    "recommendations": {
+      "temperature_high": "Restore cold storage to 4–5 °C. Sprouting begins above 8 °C.",
+      "humidity_low": "Potatoes require near-saturation humidity (95–98 %). Check humidifier.",
+      "gas_spike": "Monitor for late-blight conditions (warm + humid). Ventilate immediately."
+    }
+  },
+  "banana": {
+    "optimal_temp_min": 13, "optimal_temp_max": 14,
+    "optimal_rh_min": 90,  "optimal_rh_max": 95,
+    "shelf_life_days_optimal": 21,
+    "price_per_kg_inr": 40,
+    "recommendations": {
+      "temperature_high": "Cool to 13–14 °C. Ripening accelerates exponentially above 18 °C.",
+      "humidity_low": "Maintain 90–95 % RH to prevent peel dehydration.",
+      "gas_spike": "High ethylene detected — bananas may be entering climacteric ripening. Sell soon."
+    }
+  },
+  "rice": {
+    "optimal_temp_min": 15, "optimal_temp_max": 20,
+    "optimal_rh_min": 50,  "optimal_rh_max": 65,
+    "shelf_life_days_optimal": 365,
+    "price_per_kg_inr": 35,
+    "recommendations": {
+      "temperature_high": "Temperature above 25 °C with high humidity promotes fungal growth.",
+      "humidity_high": "CRITICAL: Reduce RH below 65 % immediately. Grain moisture > 14 % causes mould.",
+      "gas_spike": "Elevated CO₂ suggests aerobic respiration or insect infestation. Fumigate."
+    }
+  },
+  "onion": {
+    "optimal_temp_min": 0, "optimal_temp_max": 2,
+    "optimal_rh_min": 65,  "optimal_rh_max": 70,
+    "shelf_life_days_optimal": 180,
+    "price_per_kg_inr": 25,
+    "recommendations": {
+      "temperature_high": "Sprouting begins above 5 °C. Reduce cold-store temperature.",
+      "humidity_high": "Onions require LOW humidity (65–70 %). High RH causes neck rot.",
+      "gas_spike": "Possible bacterial soft rot. Cull affected bulbs and improve airflow."
+    }
+  }
+}

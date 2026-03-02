@@ -1,0 +1,62 @@
+# ── Python ────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.pkl
+
+# ── Data (large files) ───────────────────────
+ml/data/*.csv
+
+# ── Secrets / credentials ────────────────────
+gateway/rpi-gateway-key.json
+*.json.bak
+*.key
+*.pem
+
+# ── IDE ──────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+Thumbs.db
+
+# ── Flutter / Dart ───────────────────────────
+mobile/.dart_tool/
+mobile/.pub-cache/
+mobile/.pub/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.metadata
+mobile/android/.gradle/
+mobile/android/.idea/
+mobile/android/.kotlin/
+mobile/android/local.properties
+mobile/android/app/google-services.json
+mobile/android/app/.cxx/
+mobile/android/*.iml
+mobile/pubspec.lock
+
+# ── Arduino / PlatformIO ────────────────────
+firmware/**/*.elf
+firmware/**/*.bin
+
+# ── Plots (regeneratable) ───────────────────
+ml/plots/*.png
+
+# ── Pytest ───────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── OS ───────────────────────────────────────
+*.swp
+*.swo
+*~

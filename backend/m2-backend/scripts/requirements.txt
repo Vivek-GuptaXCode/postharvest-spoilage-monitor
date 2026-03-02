@@ -1,0 +1,3 @@
+# Dependencies for M2 scripts (simulator, seeder, tests)
+requests==2.31.*
+pytest==8.*

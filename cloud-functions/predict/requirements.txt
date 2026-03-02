@@ -1,0 +1,8 @@
+functions-framework==3.*
+xgboost==3.2.0
+scikit-learn==1.8.0
+numpy>=2.0
+pandas>=2.2
+google-cloud-firestore>=2.16
+google-cloud-bigquery>=3.14
+firebase-admin>=6.4
