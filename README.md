@@ -155,7 +155,7 @@ See [backend/m2-backend/README.md](backend/m2-backend/README.md) for alert & API
 
 ## Tech Stack
 
-- **IoT**: ESP32, ESP32-CAM, Raspberry Pi 4
+- **IoT**: ESP32, ESP32-CAM
 - **Cloud**: Google Cloud Functions (Gen 2), Firestore, BigQuery, Cloud Storage, FCM
 - **ML**: XGBoost (risk regression + spoilage days regression)
 - **Mobile**: Flutter + Riverpod + Firebase SDK
