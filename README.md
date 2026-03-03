@@ -9,7 +9,7 @@ Built at **CU NextGen Hack 2026** — PS 12: IoT-Based Post-Harvest Storage Loss
 ## Architecture
 
 ```
-ESP32 Sensors ──► Raspberry Pi Gateway ──► Google Cloud Functions ──► Firestore
+ESP32 Sensors ──► Google Cloud Functions ──► Firestore
                                                  │                        │
                                            XGBoost Models           Flutter App
                                            BigQuery Logs            (real-time)
