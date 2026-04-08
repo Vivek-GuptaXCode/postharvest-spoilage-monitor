@@ -10,6 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 class Alert {
   final String id;
   final String warehouseId;
+  final String? zoneId;
   final String type; // M1 writes: 'critical_risk', 'high_risk'
   final String severity; // M1 writes: 'critical', 'warning'
   final String message;
@@ -19,6 +20,7 @@ class Alert {
   Alert({
     required this.id,
     this.warehouseId = '',
+    this.zoneId,
     required this.type,
     required this.severity,
     required this.message,
@@ -42,6 +44,7 @@ class Alert {
     return Alert(
       id: doc.id,
       warehouseId: data['warehouseId'] ?? _extractWarehouseId(doc.reference),
+      zoneId: data['zoneId'] ?? data['zone_id'],
       type: data['type'] ?? '',
       severity: data['severity'] ?? 'warning',
       message: data['message'] ?? '',
@@ -55,6 +58,7 @@ class Alert {
     return Alert(
       id: doc.id,
       warehouseId: data['warehouseId'] ?? _extractWarehouseId(doc.reference),
+      zoneId: data['zoneId'] ?? data['zone_id'],
       type: data['type'] ?? '',
       severity: data['severity'] ?? 'warning',
       message: data['message'] ?? '',
@@ -67,6 +71,7 @@ class Alert {
     return {
       'type': type,
       'severity': severity,
+      if (zoneId != null) 'zoneId': zoneId,
       'message': message,
       'acknowledged': acknowledged,
       'timestamp': Timestamp.fromDate(timestamp),
@@ -76,6 +81,7 @@ class Alert {
   Alert copyWith({
     String? id,
     String? warehouseId,
+    String? zoneId,
     String? type,
     String? severity,
     String? message,
@@ -85,6 +91,7 @@ class Alert {
     return Alert(
       id: id ?? this.id,
       warehouseId: warehouseId ?? this.warehouseId,
+      zoneId: zoneId ?? this.zoneId,
       type: type ?? this.type,
       severity: severity ?? this.severity,
       message: message ?? this.message,

@@ -6,6 +6,8 @@ class Warehouse {
   final String location;
   final String cropType;
   final double capacity;
+  final int zoneCount;
+  final List<String> zones;
   final DateTime? createdAt;
 
   Warehouse({
@@ -14,6 +16,8 @@ class Warehouse {
     required this.location,
     required this.cropType,
     required this.capacity,
+    this.zoneCount = 0,
+    this.zones = const [],
     this.createdAt,
   });
 
@@ -38,6 +42,8 @@ class Warehouse {
       // M1 writes 'commodityType'; M2 API may use 'cropType'
       cropType: data['cropType'] ?? data['commodityType'] ?? '',
       capacity: (data['capacity'] ?? 0).toDouble(),
+      zoneCount: (data['zoneCount'] ?? 0).toInt(),
+      zones: List<String>.from(data['zones'] ?? []),
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
     );
   }
@@ -51,6 +57,8 @@ class Warehouse {
       cropType:
           json['cropType'] as String? ?? json['commodityType'] as String? ?? '',
       capacity: (json['capacity'] as num?)?.toDouble() ?? 0,
+      zoneCount: (json['zoneCount'] as num?)?.toInt() ?? 0,
+      zones: List<String>.from(json['zones'] ?? []),
       createdAt:
           json['createdAt'] != null
               ? DateTime.tryParse(json['createdAt'].toString())
@@ -64,6 +72,8 @@ class Warehouse {
       'location': location,
       'cropType': cropType,
       'capacity': capacity,
+      'zoneCount': zoneCount,
+      'zones': zones,
       'createdAt':
           createdAt != null
               ? Timestamp.fromDate(createdAt!)
@@ -78,6 +88,8 @@ class Warehouse {
     'location': location,
     'cropType': cropType,
     'capacity': capacity,
+    'zoneCount': zoneCount,
+    'zones': zones,
     'createdAt': createdAt?.toIso8601String(),
   };
 
@@ -87,6 +99,8 @@ class Warehouse {
     String? location,
     String? cropType,
     double? capacity,
+    int? zoneCount,
+    List<String>? zones,
     DateTime? createdAt,
   }) {
     return Warehouse(
@@ -95,6 +109,8 @@ class Warehouse {
       location: location ?? this.location,
       cropType: cropType ?? this.cropType,
       capacity: capacity ?? this.capacity,
+      zoneCount: zoneCount ?? this.zoneCount,
+      zones: zones ?? this.zones,
       createdAt: createdAt ?? this.createdAt,
     );
   }

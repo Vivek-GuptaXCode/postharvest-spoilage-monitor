@@ -25,6 +25,7 @@ Field names in Firestore (camelCase, set by M1's predict-spoilage):
 import csv
 import io
 import json
+import re
 from datetime import datetime, timedelta
 
 import functions_framework
@@ -260,6 +261,108 @@ def _acknowledge_alert(warehouse_id: str, alert_id: str) -> tuple:
     return _json_response({"status": "acknowledged", "alert_id": alert_id})
 
 
+def _list_zones(warehouse_id: str) -> tuple:
+    """GET /warehouse/{id}/zones — list all zones with latest status."""
+    wh_ref = db.collection("warehouses").document(warehouse_id)
+    wh_doc = wh_ref.get()
+    if not wh_doc.exists:
+        return _json_response({"error": f"Warehouse '{warehouse_id}' not found."}, 404)
+
+    zones = []
+    for doc in wh_ref.collection("zones").stream():
+        zone = doc.to_dict()
+        zone["id"] = doc.id
+
+        # Fetch latest/current subdocument for this zone
+        latest = doc.reference.collection("latest").document("current").get()
+        if latest.exists:
+            latest_data = latest.to_dict()
+            if "timestamp" in latest_data and hasattr(latest_data["timestamp"], "isoformat"):
+                latest_data["timestamp"] = latest_data["timestamp"].isoformat()
+            zone["latest"] = latest_data
+        else:
+            zone["latest"] = None
+
+        # Convert any Timestamp fields in the zone doc itself
+        if "createdAt" in zone and hasattr(zone["createdAt"], "isoformat"):
+            zone["createdAt"] = zone["createdAt"].isoformat()
+
+        zones.append(zone)
+
+    return _json_response(zones)
+
+
+def _zone_summary(warehouse_id: str, zone_id: str) -> tuple:
+    """GET /warehouse/{id}/zone/{zoneId}/summary — zone-level 24h stats."""
+    # Validate zone_id format
+    if not re.match(r"^zone-[A-Z]$", zone_id):
+        return _json_response({"error": f"Invalid zone_id '{zone_id}'. Must match 'zone-[A-Z]'."}, 400)
+
+    zone_ref = (
+        db.collection("warehouses").document(warehouse_id)
+        .collection("zones").document(zone_id)
+    )
+    zone_doc = zone_ref.get()
+    if not zone_doc.exists:
+        return _json_response({"error": f"Zone '{zone_id}' in warehouse '{warehouse_id}' not found."}, 404)
+
+    since = datetime.utcnow() - timedelta(hours=24)
+    readings = list(
+        zone_ref.collection("readings")
+        .where("timestamp", ">=", since)
+        .order_by("timestamp")
+        .stream()
+    )
+
+    zone_data = zone_doc.to_dict()
+
+    if not readings:
+        return _json_response({
+            "warehouse_id": warehouse_id,
+            "zone_id": zone_id,
+            "commodity_type": zone_data.get("commodityType", "unknown"),
+            "readings_count": 0,
+            "message": "No readings in the last 24 hours.",
+        })
+
+    temps = [r.to_dict().get("temperature", 0) for r in readings]
+    hums  = [r.to_dict().get("humidity", 0) for r in readings]
+    risks = [r.to_dict().get("riskScore", 0) for r in readings]
+    days_list = [r.to_dict()["daysToSpoilage"] for r in readings if "daysToSpoilage" in r.to_dict()]
+
+    # Latest reading
+    latest_ref = zone_ref.collection("latest").document("current").get()
+    latest_data = None
+    if latest_ref.exists:
+        latest_data = latest_ref.to_dict()
+        if "timestamp" in latest_data and hasattr(latest_data["timestamp"], "isoformat"):
+            latest_data["timestamp"] = latest_data["timestamp"].isoformat()
+
+    return _json_response({
+        "warehouse_id": warehouse_id,
+        "zone_id": zone_id,
+        "commodity_type": zone_data.get("commodityType", "unknown"),
+        "readings_count": len(readings),
+        "period_hours": 24,
+        "temperature": {
+            "avg": round(sum(temps) / len(temps), 2),
+            "min": round(min(temps), 2),
+            "max": round(max(temps), 2),
+        },
+        "humidity": {
+            "avg": round(sum(hums) / len(hums), 2),
+            "min": round(min(hums), 2),
+            "max": round(max(hums), 2),
+        },
+        "risk_score": {
+            "avg": round(sum(risks) / len(risks), 2),
+            "max": round(max(risks), 2),
+        },
+        "days_to_spoilage_latest": round(days_list[-1], 2) if days_list else None,
+        "latest": latest_data,
+    })
+
+
 def _health() -> tuple:
     """GET /health — simple health check for monitoring and integration tests."""
     return _json_response({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
@@ -303,6 +406,15 @@ def api_handler(request):
     if len(parts) == 4 and parts[1] == "warehouse" and parts[3] == "export" and method == "GET":
         hours = int(request.args.get("hours", 24))
         return _export_readings(parts[2], hours)
+
+    # GET /warehouse/{id}/zones                     (Part 6 — Zone-Aware)
+    if len(parts) == 4 and parts[1] == "warehouse" and parts[3] == "zones" and method == "GET":
+        return _list_zones(parts[2])
+
+    # GET /warehouse/{id}/zone/{zoneId}/summary       (Part 6 — Zone-Aware)
+    if (len(parts) == 6 and parts[1] == "warehouse"
+            and parts[3] == "zone" and parts[5] == "summary" and method == "GET"):
+        return _zone_summary(parts[2], parts[4])
 
     # POST /alerts/{warehouseId}/{alertId}/acknowledge
     if (

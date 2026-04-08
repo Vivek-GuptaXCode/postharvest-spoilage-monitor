@@ -93,6 +93,16 @@ class NotificationService {
     return _messaging.unsubscribeFromTopic('warehouse_$warehouseId');
   }
 
+  /// Subscribe to a specific zone within a warehouse.
+  Future<void> subscribeToZone(String warehouseId, String zoneId) {
+    return _messaging.subscribeToTopic('warehouse_${warehouseId}_$zoneId');
+  }
+
+  /// Unsubscribe from a zone topic.
+  Future<void> unsubscribeFromZone(String warehouseId, String zoneId) {
+    return _messaging.unsubscribeFromTopic('warehouse_${warehouseId}_$zoneId');
+  }
+
   // ──────────────────────────────────────────────
   // Foreground message handler
   // ──────────────────────────────────────────────

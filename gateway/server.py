@@ -4,159 +4,173 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-
+# Cloud Function URL (predict-spoilage with batch + decryption support)
 CLOUD_FUNCTION_URL = "https://predict-spoilage-n6hvbwpdfq-el.a.run.app"
 
-
-DEVICE_TO_WAREHOUSE = {
-    "esp32-node-01": "wh001",
-    "esp32-node-02": "wh002",
-    "esp32-node-03": "wh003",
+# Device → (warehouse, zone) mapping
+DEVICE_TO_ZONE = {
+    "esp32-node-01": {"warehouse_id": "wh001", "zone_id": "zone-A"},
+    "esp32-node-02": {"warehouse_id": "wh001", "zone_id": "zone-B"},
+    "esp32-node-03": {"warehouse_id": "wh001", "zone_id": "zone-C"},
+    "esp32-node-04": {"warehouse_id": "wh002", "zone_id": "zone-A"},
 }
 
-
 data_count = 0
+batch_count = 0
 
 
 @app.route("/data", methods=["POST"])
 def receive_data():
-    global data_count
+    """Accept encrypted batch or legacy single payloads from ESP32 nodes.
 
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON received"}), 400
+    Encrypted payloads are forwarded AS-IS (gateway never decrypts).
+    Legacy payloads are wrapped with zone info and forwarded.
+    """
+    global data_count, batch_count
 
-        data_count += 1
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw = request.get_json(force=True)
+    if not raw:
+        return jsonify({"error": "No JSON body"}), 400
 
-    
-        device_id    = data.get("device_id", "unknown")
-        commodity    = data.get("commodity", "tomato")
-        temperature  = data.get("temperature", 0)
-        humidity     = data.get("humidity", 0)
-        gas_level    = data.get("gas_level", 0)
-        co2          = data.get("co2", 400)
-        hours        = data.get("hours_in_storage", 0)
+    device_id = raw.get("device_id", "unknown")
+    mapping = DEVICE_TO_ZONE.get(device_id, {})
+    warehouse_id = raw.get("warehouse_id") or mapping.get("warehouse_id", "wh001")
+    zone_id = raw.get("zone_id") or mapping.get("zone_id", "zone-A")
 
-        
-        if "warehouse_id" in data:
-            warehouse_id = data["warehouse_id"]
-        else:
-            warehouse_id = DEVICE_TO_WAREHOUSE.get(device_id, "wh001")
+    is_encrypted = raw.get("encrypted", False)
 
-        print(f"\n{'='*40}")
-        print(f"  Data #{data_count} | {timestamp}")
-        print(f"{'='*40}")
-        print(f"  Device       : {device_id}")
-        print(f"  Warehouse ID : {warehouse_id}")
-        print(f"  Commodity    : {commodity}")
-        print(f"  Temperature  : {temperature}°C")
-        print(f"  Humidity     : {humidity}%")
-        print(f"  Gas Level    : {gas_level}")
-        print(f"  CO2          : {co2}")
-        print(f"  Hours Stored : {hours}")
-
-     
-        payload = {
-            "warehouse_id":     warehouse_id,
-            "commodity_type":   commodity,
-            "temperature":      temperature,
-            "humidity":         humidity,
-            "co2":              co2,
-            "gas_level":        gas_level,
-            "hours_in_storage": hours,
+    # ── Encrypted batch mode (NEW) ────────────────────────────────────
+    if is_encrypted:
+        # Forward encrypted payload directly — gateway does NOT decrypt
+        forward_payload = {
+            "warehouse_id": warehouse_id,
+            "zone_id": zone_id,
+            "commodity_type": raw.get("commodity_type", "tomato"),
+            "batch_size": raw.get("batch_size", 10),
+            "encrypted": True,
+            "iv": raw.get("iv"),
+            "ciphertext": raw.get("ciphertext"),
         }
 
-        print(f"\n  >> Sending to Cloud Function...")
-        print(f"  >> Payload: {payload}")
+        batch_size = raw.get("batch_size", 10)
+        print(f"\n{'='*50}")
+        print(f"  🔐 ENCRYPTED BATCH from {device_id}")
+        print(f"  📍 {warehouse_id}/{zone_id}")
+        print(f"  📦 Expected readings: {batch_size}")
+        print(f"  🔑 IV: {raw.get('iv', '?')[:24]}...")
+        print(f"  📏 Ciphertext: {len(raw.get('ciphertext', ''))} chars")
+        print(f"{'='*50}")
 
-        
+        try:
+            resp = requests.post(CLOUD_FUNCTION_URL, json=forward_payload, timeout=30)
+            data_count += batch_size
+            batch_count += 1
+            result = resp.json()
+            processed = result.get("processed", 0)
+            print(f"  ✅ Cloud: {processed}/{batch_size} processed (HTTP {resp.status_code})")
+            return jsonify(result), resp.status_code
+        except requests.exceptions.Timeout:
+            return jsonify({"error": "Cloud Function timeout on encrypted batch"}), 504
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # ── Plaintext batch mode ──────────────────────────────────────────
+    readings = raw.get("readings")
+    if readings and isinstance(readings, list):
+        batch_payload = {
+            "warehouse_id": warehouse_id,
+            "zone_id": zone_id,
+            "commodity_type": raw.get("commodity_type", raw.get("commodity", "tomato")),
+            "batch": True,
+            "readings": readings,
+        }
+
+        print(f"\n  📡 PLAINTEXT BATCH from {device_id} | {warehouse_id}/{zone_id}")
+        print(f"  Readings: {len(readings)}")
+
+        try:
+            resp = requests.post(CLOUD_FUNCTION_URL, json=batch_payload, timeout=30)
+            data_count += len(readings)
+            batch_count += 1
+            return jsonify(resp.json()), resp.status_code
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # ── Legacy single-reading mode (backward compatible) ──────────────
+    commodity = raw.get("commodity_type") or raw.get("commodity", "tomato")
+    payload = {
+        "warehouse_id": warehouse_id,
+        "zone_id": zone_id,
+        "commodity_type": commodity,
+        "temperature": raw.get("temperature", 0),
+        "humidity": raw.get("humidity", 0),
+        "co2": raw.get("co2", 400),
+        "gas_level": raw.get("gas_level", 0),
+        "hours_in_storage": raw.get("hours_in_storage", 0),
+    }
+
+    print(f"\n  📡 Single reading from {device_id} → {warehouse_id}/{zone_id}")
+
+    try:
         resp = requests.post(CLOUD_FUNCTION_URL, json=payload, timeout=10)
-        result = resp.json()
-
-       
-        risk_level      = result.get("risk_level", "unknown")
-        risk_score      = result.get("risk_score", "N/A")
-        days_to_spoil   = result.get("days_to_spoilage", "N/A")
-        alert           = result.get("alert", "none")
-
-        print(f"\n  << Cloud Response (HTTP {resp.status_code}):")
-        print(f"  << Risk Level     : {risk_level}")
-        print(f"  << Risk Score     : {risk_score}")
-        print(f"  << Days to Spoil  : {days_to_spoil}")
-        print(f"  << Alert          : {alert}")
-        print(f"{'='*40}\n")
-
-        return jsonify(result), resp.status_code
-
+        data_count += 1
+        return jsonify(resp.json()), resp.status_code
     except requests.exceptions.Timeout:
-        print(f"  !! ERROR: Cloud Function timeout")
         return jsonify({"error": "Cloud Function timeout"}), 504
-
-    except requests.exceptions.ConnectionError:
-        print(f"  !! ERROR: Cannot reach Cloud Function")
-        return jsonify({"error": "Cannot reach Cloud Function"}), 502
-
     except Exception as e:
-        print(f"  !! ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({
-        "status": "Flask server running",
+        "status": "Gateway running (encrypted batch mode)",
         "cloud_function": CLOUD_FUNCTION_URL,
         "total_readings": data_count,
-        "device_mappings": DEVICE_TO_WAREHOUSE,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "total_batches": batch_count,
+        "device_zone_mappings": DEVICE_TO_ZONE,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }), 200
 
 
 @app.route("/status", methods=["GET"])
 def status():
-    """Check if Cloud Function is reachable"""
+    """Health check with Cloud Function reachability test."""
     try:
-        test_payload = {
-            "warehouse_id":     "wh001",
-            "commodity_type":   "tomato",
-            "temperature":      14.0,
-            "humidity":         90.0,
-            "co2":              400,
-            "gas_level":        20.0,
-            "hours_in_storage": 0
+        test = {
+            "warehouse_id": "wh001",
+            "zone_id": "zone-A",
+            "commodity_type": "tomato",
+            "batch": True,
+            "readings": [
+                {"temperature": 14.0, "humidity": 90.0, "co2": 400, "gas_level": 20.0}
+            ],
         }
-        resp = requests.post(CLOUD_FUNCTION_URL, json=test_payload, timeout=10)
+        resp = requests.post(CLOUD_FUNCTION_URL, json=test, timeout=10)
         return jsonify({
-            "flask": "running",
+            "gateway": "running",
             "cloud_function": "reachable",
             "cloud_status": resp.status_code,
-            "test_response": resp.json(),
-            "total_readings": data_count
+            "total_readings": data_count,
+            "total_batches": batch_count,
         }), 200
     except Exception as e:
         return jsonify({
-            "flask": "running",
+            "gateway": "running",
             "cloud_function": "unreachable",
             "error": str(e),
-            "total_readings": data_count
         }), 200
 
 
 if __name__ == "__main__":
-    print("\n" + "=" * 50)
-    print("   PostHarvest Flask Gateway")
-    print("=" * 50)
+    print("\n" + "=" * 55)
+    print("   PostHarvest Gateway (Encrypted Batch + Zone)")
+    print("=" * 55)
     print(f"   Cloud Function : {CLOUD_FUNCTION_URL}")
     print(f"   Listening on   : http://0.0.0.0:5000")
-    print(f"\n   Device Mappings:")
-    for dev, wh in DEVICE_TO_WAREHOUSE.items():
-        print(f"     {dev}  →  {wh}")
-    print(f"\n   Endpoints:")
-    print(f"     POST /data    - Receive ESP32 data")
-    print(f"     GET  /        - Health check")
-    print(f"     GET  /status  - Test Cloud Function")
-    print(f"\n   Waiting for ESP32 data...")
-    print("=" * 50 + "\n")
+    print(f"\n   Device → Zone Mappings:")
+    for dev, info in DEVICE_TO_ZONE.items():
+        print(f"     {dev}  →  {info['warehouse_id']}/{info['zone_id']}")
+    print(f"\n   Modes: encrypted | plaintext-batch | single")
+    print("=" * 55 + "\n")
     app.run(host="0.0.0.0", port=5000, debug=True)

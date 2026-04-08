@@ -69,6 +69,14 @@ def _cleanup_warehouse(client, wh_id):
     wh_ref = client.collection("warehouses").document(wh_id)
     for sub in ("latest", "readings", "predictions", "alerts"):
         _delete_collection(wh_ref.collection(sub))
+
+    # Clean up zone subcollections
+    for zone_doc in wh_ref.collection("zones").stream():
+        zone_ref = zone_doc.reference
+        for zone_sub in ("latest", "readings"):
+            _delete_collection(zone_ref.collection(zone_sub))
+        zone_ref.delete()
+
     wh_ref.delete()
 
 
@@ -95,6 +103,9 @@ def seed_warehouse(firestore_client):
         "commodityType": "tomato",
         "capacity": 500,
         "ownerId": "test-user-001",
+        "zoneCount": 10,
+        "zones": ["zone-A", "zone-B", "zone-C", "zone-D", "zone-E",
+                  "zone-F", "zone-G", "zone-H", "zone-I", "zone-J"],
     })
 
     # Latest reading (simulating M1's predict-spoilage output)
@@ -124,6 +135,30 @@ def seed_warehouse(firestore_client):
             "daysToSpoilage": 7.0 - i,
             "commodityType": "tomato",
             "timestamp": now - datetime.timedelta(hours=3 - i),
+        })
+
+    # Seed zone subcollections
+    for zone_id in ("zone-A", "zone-B", "zone-C", "zone-D", "zone-E",
+                     "zone-F", "zone-G", "zone-H", "zone-I", "zone-J"):
+        zone_ref = wh_ref.collection("zones").document(zone_id)
+        zone_ref.set({
+            "label": zone_id.replace("-", " ").title(),
+            "sensorId": "",
+            "commodityType": "tomato",
+            "createdAt": now,
+        })
+        zone_ref.collection("latest").document("current").set({
+            "temperature": 28.5,
+            "humidity": 72.0,
+            "co2": 450.0,
+            "gasLevel": 0.2,
+            "riskScore": 0.45,
+            "riskLevel": "warning",
+            "daysToSpoilage": 5.5,
+            "estimatedLossInr": 12000.0,
+            "commodityType": "tomato",
+            "zoneId": zone_id,
+            "timestamp": now,
         })
 
     yield wh_id

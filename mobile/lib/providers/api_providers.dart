@@ -61,3 +61,22 @@ final exportCsvProvider = FutureProvider.family<
   final apiService = ref.read(apiServiceProvider);
   return apiService.exportReadingsCsv(params.warehouseId, hours: params.hours);
 });
+
+/// FutureProvider — list zones for a warehouse from the REST API
+final zonesApiProvider =
+    FutureProvider.family<List<Map<String, dynamic>>, String>((
+      ref,
+      warehouseId,
+    ) async {
+      final apiService = ref.read(apiServiceProvider);
+      return apiService.getZones(warehouseId);
+    });
+
+/// FutureProvider — zone-level summary from the REST API
+final zoneSummaryApiProvider = FutureProvider.family<
+  Map<String, dynamic>,
+  ({String warehouseId, String zoneId})
+>((ref, params) async {
+  final apiService = ref.read(apiServiceProvider);
+  return apiService.getZoneSummary(params.warehouseId, params.zoneId);
+});

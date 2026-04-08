@@ -37,6 +37,24 @@ service cloud.firestore {
           && request.resource.data.acknowledged == true;
         allow create, delete: if false;
       }
+
+      // ── Zones (scalable multi-sensor layout) ──────────────
+      match /zones/{zoneId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+
+        // Per-zone latest reading
+        match /latest/{docId} {
+          allow read: if request.auth != null;
+          allow write: if false;
+        }
+
+        // Per-zone historical readings
+        match /readings/{readingId} {
+          allow read: if request.auth != null;
+          allow write: if false;
+        }
+      }
     }
   }
 }

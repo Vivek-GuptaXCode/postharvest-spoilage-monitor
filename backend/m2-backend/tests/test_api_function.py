@@ -178,5 +178,93 @@ class TestRouting:
     def test_cors_preflight(self):
         resp = api_handler(_make_request("OPTIONS", "/health"))
         _, status, headers = resp
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Zone endpoints (Part 6)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestListZonesEndpoint:
+    @pytest.mark.integration
+    def test_list_zones_returns_list(self, seed_warehouse):
+        data, status = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zones"))
+        )
+        assert status == 200
+        assert isinstance(data, list)
+        assert len(data) == 10  # 10 zones seeded
+
+    @pytest.mark.integration
+    def test_zones_have_id_and_latest(self, seed_warehouse):
+        data, _ = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zones"))
+        )
+        zone = data[0]
+        assert "id" in zone
+        assert zone["id"].startswith("zone-")
+        assert "latest" in zone
+        assert zone["latest"] is not None
+        assert "temperature" in zone["latest"]
+
+    @pytest.mark.integration
+    def test_list_zones_nonexistent_warehouse(self, clean_firestore):
+        _, status = _parse_response(
+            api_handler(_make_request("GET", "/warehouse/nonexistent-999/zones"))
+        )
+        assert status == 404
+
+
+class TestZoneSummaryEndpoint:
+    @pytest.mark.integration
+    def test_zone_summary_returns_data(self, seed_warehouse):
+        """Zone summary — zone has latest but may not have readings from last 24h."""
+        data, status = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zone/zone-A/summary"))
+        )
+        assert status == 200
+        assert data["zone_id"] == "zone-A"
+        assert data["warehouse_id"] == seed_warehouse
+        assert "commodity_type" in data
+
+    @pytest.mark.integration
+    def test_zone_summary_nonexistent_zone(self, seed_warehouse):
+        _, status = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zone/zone-Z/summary"))
+        )
+        # zone-Z doesn't exist in seed data
+        assert status == 404
+
+    @pytest.mark.integration
+    def test_zone_summary_invalid_zone_id_format(self, seed_warehouse):
+        _, status = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zone/bad-id/summary"))
+        )
+        assert status == 400
+
+    @pytest.mark.integration
+    def test_zone_summary_with_readings(self, seed_warehouse, firestore_client):
+        """Seed readings into a zone and verify stats are returned."""
+        import datetime
+        zone_ref = (
+            firestore_client.collection("warehouses").document(seed_warehouse)
+            .collection("zones").document("zone-A")
+        )
+        now = datetime.datetime.utcnow()
+        for i in range(3):
+            zone_ref.collection("readings").add({
+                "temperature": 25.0 + i,
+                "humidity": 60.0 + i * 5,
+                "riskScore": 0.3 + i * 0.1,
+                "daysToSpoilage": 6.0 - i,
+                "timestamp": now - datetime.timedelta(hours=2 - i),
+            })
+        data, status = _parse_response(
+            api_handler(_make_request("GET", f"/warehouse/{seed_warehouse}/zone/zone-A/summary"))
+        )
+        assert status == 200
+        assert data["readings_count"] == 3
+        assert "temperature" in data
+        assert data["temperature"]["min"] == 25.0
+        assert data["temperature"]["max"] == 27.0
         assert status == 204
         assert headers["Access-Control-Allow-Origin"] == "*"

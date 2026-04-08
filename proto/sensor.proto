@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package postharvest;
+
+option java_multiple_files = true;
+option java_package = "com.postharvest.grpc";
+
+// ─── Messages ────────────────────────────────────────────────────────
+
+// A single sensor sample (unencrypted, used inside the batch)
+message SensorSample {
+  float temperature       = 1;
+  float humidity          = 2;
+  float gas_level         = 3;
+  float co2               = 4;
+  uint32 sample_offset_ms = 5;   // millis() at capture time
+}
+
+// Encrypted batch payload sent from ESP32 → Cloud
+message EncryptedBatchRequest {
+  string device_id      = 1;
+  string warehouse_id   = 2;
+  string zone_id        = 3;
+  string commodity_type = 4;
+  bytes  iv             = 5;     // 16-byte AES-128-CBC IV
+  bytes  ciphertext     = 6;     // AES-128-CBC encrypted SensorBatch
+  uint32 batch_size     = 7;     // expected number of samples
+}
+
+// The plaintext batch (serialized, then encrypted)
+message SensorBatch {
+  repeated SensorSample readings = 1;
+}
+
+// Single prediction result
+message PredictionResult {
+  string zone_id          = 1;
+  string risk_level       = 2;
+  float  risk_score       = 3;
+  float  days_to_spoilage = 4;
+  string recommendation   = 5;
+  float  estimated_loss   = 6;
+  int32  index            = 7;
+}
+
+// Cloud Function response
+message BatchPredictionResponse {
+  string status       = 1;
+  string warehouse_id = 2;
+  string zone_id      = 3;
+  uint32 batch_size   = 4;
+  uint32 processed    = 5;
+  string timestamp    = 6;
+  repeated PredictionResult results = 7;
+}
+
+// ─── Service ─────────────────────────────────────────────────────────
+
+service SpoilagePrediction {
+  // ESP32 sends encrypted batch → Cloud decrypts, predicts, stores
+  rpc PredictBatch (EncryptedBatchRequest) returns (BatchPredictionResponse);
+}

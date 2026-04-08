@@ -1,5 +1,6 @@
 import '../models/reading.dart';
 import '../models/warehouse.dart';
+import '../models/zone.dart' as zone_model;
 import '../models/alert.dart' as alert_model;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -115,5 +116,83 @@ final latestReadingWithMetaProvider = StreamProvider.family<
           isFromCache: snap.metadata.isFromCache,
           hasPendingWrites: snap.metadata.hasPendingWrites,
         ),
+      );
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// ZONE-AWARE PROVIDERS
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Stream all zones for a warehouse
+/// Listens to: warehouses/{warehouseId}/zones
+final zonesProvider = StreamProvider.family<List<zone_model.Zone>, String>((
+  ref,
+  warehouseId,
+) {
+  return FirebaseFirestore.instance
+      .collection('warehouses/$warehouseId/zones')
+      .snapshots()
+      .map(
+        (snap) =>
+            snap.docs.map((doc) => zone_model.Zone.fromFirestore(doc)).toList(),
+      );
+});
+
+/// Stream the latest sensor data for a specific zone
+/// Listens to: warehouses/{warehouseId}/zones/{zoneId}/latest/current
+final zoneLatestProvider = StreamProvider.family<
+  Map<String, dynamic>,
+  ({String warehouseId, String zoneId})
+>((ref, params) {
+  return FirebaseFirestore.instance
+      .doc(
+        'warehouses/${params.warehouseId}/zones/${params.zoneId}/latest/current',
+      )
+      .snapshots()
+      .map((snap) {
+        if (snap.exists) {
+          return snap.data()!;
+        }
+        return <String, dynamic>{};
+      });
+});
+
+/// Stream historical readings for a specific zone
+final zoneReadingsHistoryProvider = StreamProvider.family<
+  List<Reading>,
+  ({String warehouseId, String zoneId, String timeRange})
+>((ref, params) {
+  final now = DateTime.now();
+  late DateTime startTime;
+
+  switch (params.timeRange) {
+    case '1h':
+      startTime = now.subtract(const Duration(hours: 1));
+      break;
+    case '6h':
+      startTime = now.subtract(const Duration(hours: 6));
+      break;
+    case '24h':
+      startTime = now.subtract(const Duration(hours: 24));
+      break;
+    case '7d':
+      startTime = now.subtract(const Duration(days: 7));
+      break;
+    case '30d':
+      startTime = now.subtract(const Duration(days: 30));
+      break;
+    default:
+      startTime = now.subtract(const Duration(hours: 24));
+  }
+
+  return FirebaseFirestore.instance
+      .collection(
+        'warehouses/${params.warehouseId}/zones/${params.zoneId}/readings',
+      )
+      .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startTime))
+      .orderBy('timestamp', descending: false)
+      .snapshots()
+      .map(
+        (snap) => snap.docs.map((doc) => Reading.fromFirestore(doc)).toList(),
       );
 });

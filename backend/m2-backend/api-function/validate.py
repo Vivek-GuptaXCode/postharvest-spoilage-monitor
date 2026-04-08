@@ -18,9 +18,11 @@ import re
 
 VALID_COMMODITIES = {"tomato", "potato", "banana", "rice", "onion"}
 VALID_WAREHOUSE_PATTERN = r"^wh\d{3}$"
+VALID_ZONE_PATTERN = r"^zone-[A-Z]$"
 
 FIELD_RULES = {
     "warehouse_id":     {"type": str,   "required": True},
+    "zone_id":          {"type": str,   "required": False, "default": "zone-A"},
     "commodity_type":   {"type": str,   "required": True,  "allowed": VALID_COMMODITIES},
     "temperature":      {"type": float, "required": True,  "min": -40.0, "max": 80.0},
     "humidity":         {"type": float, "required": True,  "min": 0.0,   "max": 100.0},
@@ -109,3 +111,11 @@ def validate_sensor_payload(data: dict | None) -> tuple[dict, list[str]]:
     if errors:
         return {}, errors
     return clean, []
+
+
+def validate_zone_id(zone_id: str) -> list[str]:
+    """Validate zone_id format. Returns list of error strings."""
+    errors = []
+    if zone_id and not re.match(VALID_ZONE_PATTERN, zone_id):
+        errors.append(f"zone_id '{zone_id}' must match pattern 'zone-[A-Z]'.")
+    return errors

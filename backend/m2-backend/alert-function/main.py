@@ -47,14 +47,16 @@ def _format_sms(fields: dict, lang: str = "hi") -> str:
     severity = fields.get("severity", "warning")
     message  = fields.get("message", "Spoilage risk detected.")
     wh       = fields.get("warehouse_id", "Unknown")
+    zone     = fields.get("zone_id", "")
+    zone_label = f" [{zone}]" if zone and zone != "unknown" else ""
 
     if lang == "hi":
         return (
-            f"🚨 गंभीर चेतावनी — {wh}\n"
+            f"🚨 गंभीर चेतावनी — {wh}{zone_label}\n"
             f"{message}\n"
             f"⏰ तुरंत कार्रवाई करें!"
         )
-    return f"🚨 ALERT [{severity.upper()}] — {wh}\n{message}"
+    return f"🚨 ALERT [{severity.upper()}] — {wh}{zone_label}\n{message}"
 
 
 def _format_telegram(fields: dict) -> str:
@@ -62,11 +64,13 @@ def _format_telegram(fields: dict) -> str:
     severity = fields.get("severity", "warning")
     message  = fields.get("message", "")
     wh       = fields.get("warehouse_id", "")
+    zone     = fields.get("zone_id", "")
+    zone_label = f" • {zone}" if zone and zone != "unknown" else ""
     emoji    = "🚨" if severity == "critical" else "⚠️"
 
     return (
         f"{emoji} <b>{severity.upper()} ALERT</b>\n"
-        f"📍 <b>Warehouse:</b> {wh}\n"
+        f"📍 <b>Warehouse:</b> {wh}{zone_label}\n"
         f"📋 {message}\n\n"
         f"<i>— PostHarvest Alert Bot</i>"
     )
@@ -143,6 +147,7 @@ def _extract_fields(cloud_event_data) -> dict:
         "type":          _parse_string(fields.get("type", {})),
         "acknowledged":  _parse_bool(fields.get("acknowledged", {})),
         "warehouse_id":  warehouse_id,
+        "zone_id":       _parse_string(fields.get("zoneId", {})) or "unknown",
     }
 
 

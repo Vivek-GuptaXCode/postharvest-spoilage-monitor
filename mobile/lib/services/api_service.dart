@@ -125,6 +125,24 @@ class ApiService {
   }
 
   // ---------------------------------------------------------------------------
+  // Zones
+  // ---------------------------------------------------------------------------
+
+  /// GET /warehouse/{id}/zones — list all zones in a warehouse
+  Future<List<Map<String, dynamic>>> getZones(String warehouseId) async {
+    final data = await _getList('/warehouse/$warehouseId/zones');
+    return data.cast<Map<String, dynamic>>();
+  }
+
+  /// GET /warehouse/{id}/zone/{zoneId}/summary — zone-level summary
+  Future<Map<String, dynamic>> getZoneSummary(
+    String warehouseId,
+    String zoneId,
+  ) {
+    return _get('/warehouse/$warehouseId/zone/$zoneId/summary');
+  }
+
+  // ---------------------------------------------------------------------------
   // Camera
   // ---------------------------------------------------------------------------
 

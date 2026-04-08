@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import base64
 from datetime import datetime
 
 import firebase_admin
@@ -8,6 +9,10 @@ import functions_framework
 import numpy as np
 from firebase_admin import messaging
 from google.cloud import bigquery, firestore
+
+from aes_decrypt import decrypt_aes128_cbc
+from anomaly_detector import detect_anomalies
+from crypto_config import AES_128_KEY
 
 # ═══════════════════════════════════════════════════════════════════════
 # GLOBAL SCOPE — loaded ONCE on cold start, reused on warm invocations
@@ -37,7 +42,14 @@ bq = bigquery.Client()
 PROJECT_ID = os.environ.get("GCP_PROJECT", "postharvest-hack")
 BQ_TABLE = f"{PROJECT_ID}.postharvest.sensor_readings"
 
-RISK_LABELS = ["low", "medium", "high", "critical"]
+# Try to import generated protobuf stubs (optional — falls back to JSON)
+try:
+    from generated import sensor_pb2
+    PROTOBUF_AVAILABLE = True
+    print("[Init] Protobuf stubs loaded successfully")
+except ImportError:
+    PROTOBUF_AVAILABLE = False
+    print("[Init] Protobuf stubs not found — encrypted mode will use JSON fallback")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -125,12 +137,284 @@ def _estimate_loss_inr(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# DECRYPTION
+# ═══════════════════════════════════════════════════════════════════════
+
+def _decrypt_batch(data: dict) -> list[dict]:
+    """Decrypt AES-128-CBC encrypted protobuf payload.
+
+    Input: {"iv": "<base64>", "ciphertext": "<base64>"}
+    Output: list of dict readings
+    """
+    iv_b64 = data.get("iv", "")
+    ct_b64 = data.get("ciphertext", "")
+
+    if not iv_b64 or not ct_b64:
+        raise ValueError("Missing 'iv' or 'ciphertext' in encrypted payload")
+
+    iv = base64.b64decode(iv_b64)
+    ciphertext = base64.b64decode(ct_b64)
+
+    print(f"[Decrypt] IV: {len(iv)} bytes, Ciphertext: {len(ciphertext)} bytes")
+
+    plaintext = decrypt_aes128_cbc(AES_128_KEY, iv, ciphertext)
+
+    print(f"[Decrypt] Decrypted: {len(plaintext)} bytes")
+
+    # Try protobuf first, then fall back to JSON
+    if PROTOBUF_AVAILABLE:
+        try:
+            batch = sensor_pb2.SensorBatch()
+            batch.ParseFromString(plaintext)
+            if len(batch.readings) > 0:
+                readings = []
+                for sample in batch.readings:
+                    readings.append({
+                        "temperature": round(float(sample.temperature), 1),
+                        "humidity": round(float(sample.humidity), 1),
+                        "gas_level": round(float(sample.gas_level), 1),
+                        "co2": round(float(sample.co2), 1),
+                        "sample_offset_ms": int(sample.sample_offset_ms),
+                    })
+                print(f"[Decrypt] Parsed as protobuf: {len(readings)} readings")
+                return readings
+        except Exception as proto_err:
+            print(f"[Decrypt] Protobuf parse failed ({proto_err}), trying JSON fallback")
+
+    # Fallback: treat decrypted plaintext as JSON
+    try:
+        readings = json.loads(plaintext.decode("utf-8"))
+        print(f"[Decrypt] Parsed as JSON: {len(readings)} readings")
+        return readings
+    except (json.JSONDecodeError, UnicodeDecodeError) as json_err:
+        raise ValueError(f"Cannot parse decrypted payload as protobuf or JSON: {json_err}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SINGLE READING PROCESSOR (zone-aware)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _process_single_reading(data: dict, warehouse_id: str, zone_id: str,
+                             commodity: str, timestamp) -> dict:
+    """Process one reading: anomaly check → ML inference → zone-aware Firestore writes."""
+
+    # ── Anomaly detection (before ML inference) ───────────────────────
+    anomaly = detect_anomalies(data, commodity, THRESHOLDS)
+    is_anomalous   = anomaly["is_anomalous"]
+    anomaly_score  = anomaly["anomaly_score"]
+    anomaly_flags  = anomaly["anomaly_flags"]
+
+    if is_anomalous:
+        print(f"[Anomaly] score={anomaly_score} flags={anomaly_flags} "
+              f"zone={zone_id} temp={data.get('temperature')} "
+              f"hum={data.get('humidity')} co2={data.get('co2')} "
+              f"gas={data.get('gas_level')}")
+
+    # If physically impossible (score=1.0), skip ML — garbage in = garbage out
+    if anomaly_score >= 1.0:
+        risk_score = 0.0
+        risk_level = "unknown"
+        days_to_spoilage = -1.0
+        recommendation = ("ANOMALY: Sensor data appears corrupted. "
+                          "Check IoT device hardware and connectivity.")
+        estimated_loss = 0.0
+    else:
+        features = _build_feature_vector(data)
+
+        # Risk score: continuous 0-100
+        risk_score_raw = float(RISK_MODEL.predict(features)[0])
+        risk_score = round(max(0.0, min(100.0, risk_score_raw)), 2)
+
+        # Risk level: bin the score
+        if risk_score <= 25:    risk_level = "low"
+        elif risk_score <= 50:  risk_level = "medium"
+        elif risk_score <= 75:  risk_level = "high"
+        else:                   risk_level = "critical"
+
+        # Days to spoilage
+        days_to_spoilage = round(float(REGRESSOR.predict(features)[0]), 2)
+        days_to_spoilage = max(days_to_spoilage, 0)
+
+        recommendation = _generate_recommendation(data, risk_level)
+        estimated_loss = _estimate_loss_inr(commodity, days_to_spoilage)
+
+    wh_ref = db.collection("warehouses").document(warehouse_id)
+
+    reading = {
+        "temperature":      data["temperature"],
+        "humidity":         data["humidity"],
+        "co2":              data.get("co2", 400),
+        "gasLevel":         data.get("gas_level", 0),
+        "riskScore":        risk_score,
+        "riskLevel":        risk_level,
+        "daysToSpoilage":   days_to_spoilage,
+        "recommendation":   recommendation,
+        "estimatedLossInr": estimated_loss,
+        "commodityType":    commodity,
+        "zoneId":           zone_id,
+        "timestamp":        timestamp,
+        "imageUrl":         data.get("image_url", ""),
+        "isAnomalous":      is_anomalous,
+        "anomalyScore":     anomaly_score,
+        "anomalyFlags":     anomaly_flags,
+    }
+
+    # ── Per-zone latest + readings (NEW) ──────────────────────────────
+    zone_ref = wh_ref.collection("zones").document(zone_id)
+    zone_ref.set({"name": zone_id, "commodityType": commodity}, merge=True)
+    zone_ref.collection("latest").document("current").set(reading, merge=True)
+    zone_ref.collection("readings").add({**reading, "timestamp": timestamp})
+
+    # ── Backward-compatible warehouse-level readings ──────────────────
+    wh_ref.collection("readings").add({**reading, "timestamp": timestamp})
+
+    # ── Predictions subcollection ─────────────────────────────────────
+    boundaries = [0, 25, 50, 75, 100]
+    min_boundary_dist = min(abs(risk_score - b) for b in boundaries)
+    confidence = round(min(min_boundary_dist / 12.5 * 100, 100.0), 2)
+
+    wh_ref.collection("predictions").add({
+        "riskScore":        risk_score,
+        "riskLevel":        risk_level,
+        "daysToSpoilage":   days_to_spoilage,
+        "confidence":       confidence,
+        "zoneId":           zone_id,
+        "modelVersion":     METADATA.get("model_version", "4.0"),
+        "timestamp":        timestamp,
+    })
+
+    # ── Anomaly alert (score >= 0.8 → likely corrupt IoT endpoint) ──
+    if anomaly_score >= 0.8:
+        anomaly_alert = {
+            "type":         "anomaly",
+            "severity":     "critical" if anomaly_score >= 1.0 else "warning",
+            "zoneId":       zone_id,
+            "message": (
+                f"[{zone_id}] IoT payload anomaly detected (score {anomaly_score})! "
+                f"Flags: {', '.join(anomaly_flags)}. "
+                f"Temp {data['temperature']} °C · Humidity {data['humidity']} % · "
+                f"CO₂ {data.get('co2', 400)} ppm · Gas {data.get('gas_level', 0)}. "
+                f"Check sensor hardware and connectivity."
+            ),
+            "timestamp":    timestamp,
+            "acknowledged": False,
+        }
+        wh_ref.collection("alerts").add(anomaly_alert)
+
+        try:
+            fcm_msg = messaging.Message(
+                notification=messaging.Notification(
+                    title=f"🔧 ANOMALY — {commodity.title()} [{zone_id}]",
+                    body=anomaly_alert["message"],
+                ),
+                data={
+                    "warehouse_id": warehouse_id,
+                    "zone_id":      zone_id,
+                    "anomaly_score": str(anomaly_score),
+                    "anomaly_flags": ",".join(anomaly_flags),
+                },
+                topic=f"warehouse_{warehouse_id}",
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        sound="default",
+                        channel_id="spoilage_alerts",
+                    ),
+                ),
+            )
+            messaging.send(fcm_msg)
+        except Exception as e:
+            print(f"[FCM anomaly error] {e}")
+
+    # ── Alerts on high/critical ───────────────────────────────────────
+    if risk_level in ("high", "critical"):
+        alert_doc = {
+            "type":         f"{risk_level}_risk",
+            "severity":     "critical" if risk_level == "critical" else "warning",
+            "zoneId":       zone_id,
+            "message": (
+                f"[{zone_id}] Spoilage risk is {risk_level.upper()}! "
+                f"Temp {data['temperature']} °C · Humidity {data['humidity']} % · "
+                f"Est. shelf life {days_to_spoilage} days. {recommendation}"
+            ),
+            "timestamp":    timestamp,
+            "acknowledged": False,
+        }
+        wh_ref.collection("alerts").add(alert_doc)
+
+        try:
+            fcm_msg = messaging.Message(
+                notification=messaging.Notification(
+                    title=f"⚠️ {risk_level.upper()} — {commodity.title()} [{zone_id}]",
+                    body=alert_doc["message"],
+                ),
+                data={
+                    "warehouse_id": warehouse_id,
+                    "zone_id":      zone_id,
+                    "risk_level":   risk_level,
+                    "risk_score":   str(risk_score),
+                },
+                topic=f"warehouse_{warehouse_id}",
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        sound="default",
+                        channel_id="spoilage_alerts",
+                    ),
+                ),
+            )
+            messaging.send(fcm_msg)
+        except Exception as e:
+            print(f"[FCM error] {e}")
+
+    return {
+        "zone_id":            zone_id,
+        "risk_level":         risk_level,
+        "risk_score":         risk_score,
+        "days_to_spoilage":   days_to_spoilage,
+        "recommendation":     recommendation,
+        "estimated_loss_inr": estimated_loss,
+        "is_anomalous":       is_anomalous,
+        "anomaly_score":      anomaly_score,
+        "anomaly_flags":      anomaly_flags,
+    }
+
+
+def _update_warehouse_aggregate(warehouse_id: str, zone_results: list[dict]):
+    """Compute warehouse-level aggregate from zone results and update latest."""
+    if not zone_results:
+        return
+
+    wh_ref = db.collection("warehouses").document(warehouse_id)
+
+    avg_risk   = sum(r["risk_score"] for r in zone_results) / len(zone_results)
+    max_risk   = max(r["risk_score"] for r in zone_results)
+    min_days   = min(r["days_to_spoilage"] for r in zone_results)
+    total_loss = sum(r["estimated_loss_inr"] for r in zone_results)
+
+    if max_risk <= 25:      agg_level = "low"
+    elif max_risk <= 50:    agg_level = "medium"
+    elif max_risk <= 75:    agg_level = "high"
+    else:                   agg_level = "critical"
+
+    wh_ref.collection("latest").document("current").set({
+        "riskScore":        round(avg_risk, 2),
+        "riskLevel":        agg_level,
+        "maxRiskScore":     round(max_risk, 2),
+        "daysToSpoilage":   round(min_days, 2),
+        "estimatedLossInr": round(total_loss, 2),
+        "zoneCount":        len(zone_results),
+        "timestamp":        datetime.utcnow(),
+    }, merge=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # HTTP HANDLER
 # ═══════════════════════════════════════════════════════════════════════
 
 @functions_framework.http
 def predict_handler(request):
-    """Main entry point.  Accepts POST with sensor JSON, returns prediction."""
+    """Accepts POST with encrypted batch, plaintext batch, or single reading."""
 
     # ── CORS pre-flight ───────────────────────────────────────────────
     if request.method == "OPTIONS":
@@ -149,140 +433,186 @@ def predict_handler(request):
 
     # ── Parse input ───────────────────────────────────────────────────
     data = request.get_json(silent=True)
-    if not data or "temperature" not in data or "humidity" not in data:
-        return ({"error": "Invalid payload. Required: temperature, humidity."}, 400, headers)
+    if not data:
+        return ({"error": "Invalid JSON payload."}, 400, headers)
 
     warehouse_id = data.get("warehouse_id", "wh001")
+    zone_id      = data.get("zone_id", "zone-A")
     commodity    = data.get("commodity_type", "tomato")
+    is_encrypted = data.get("encrypted", False)
+    is_batch     = data.get("batch", False)
     timestamp    = datetime.utcnow()
 
-    # ── ML inference (two-stage: score regressor → bin) ───────────────
-    features = _build_feature_vector(data)
-
-    # Risk score: continuous 0-100 from the regressor
-    risk_score_raw = float(RISK_MODEL.predict(features)[0])
-    risk_score = round(max(0.0, min(100.0, risk_score_raw)), 2)
-
-    # Risk level: bin the predicted score
-    if risk_score <= 25:
-        risk_level = "low"
-    elif risk_score <= 50:
-        risk_level = "medium"
-    elif risk_score <= 75:
-        risk_level = "high"
-    else:
-        risk_level = "critical"
-
-    # Days to spoilage: separate regressor
-    days_to_spoilage = round(float(REGRESSOR.predict(features)[0]), 2)
-    days_to_spoilage = max(days_to_spoilage, 0)
-
-    recommendation  = _generate_recommendation(data, risk_level)
-    estimated_loss  = _estimate_loss_inr(commodity, days_to_spoilage)
-
-    # ── Firestore: latest document (real-time for Flutter) ────────────
-    wh_ref  = db.collection("warehouses").document(warehouse_id)
-    reading = {
-        "temperature":      data["temperature"],
-        "humidity":         data["humidity"],
-        "co2":              data.get("co2", 400),
-        "gasLevel":         data.get("gas_level", 0),
-        "riskScore":        risk_score,
-        "riskLevel":        risk_level,
-        "daysToSpoilage":   days_to_spoilage,
-        "recommendation":   recommendation,
-        "estimatedLossInr": estimated_loss,
-        "timestamp":        timestamp,
-        "imageUrl":         data.get("image_url", ""),
-    }
-    wh_ref.collection("latest").document("current").set(reading, merge=True)
-
-    # ── Firestore: readings subcollection (history for charts) ────────
-    wh_ref.collection("readings").add({**reading, "timestamp": timestamp})
-
-    # ── Firestore: predictions subcollection ──────────────────────────
-    # Confidence: distance from nearest boundary (further = more certain)
-    boundaries = [0, 25, 50, 75, 100]
-    min_boundary_dist = min(abs(risk_score - b) for b in boundaries)
-    confidence = round(min(min_boundary_dist / 12.5 * 100, 100.0), 2)
-
-    wh_ref.collection("predictions").add({
-        "riskScore":        risk_score,
-        "riskLevel":        risk_level,
-        "daysToSpoilage":   days_to_spoilage,
-        "confidence":       confidence,
-        "modelVersion":     METADATA.get("model_version", "4.0"),
-        "timestamp":        timestamp,
-    })
-
-    # ── BigQuery: streaming insert (≈ $0.005/month at hackathon scale) ─
-    bq_row = {
-        "warehouse_id":     warehouse_id,
-        "temperature":      data["temperature"],
-        "humidity":         data["humidity"],
-        "co2":              data.get("co2", 400),
-        "gas_level":        data.get("gas_level", 0),
-        "risk_score":       risk_score,
-        "risk_level":       risk_level,
-        "commodity_type":   commodity,
-        "days_to_spoilage": days_to_spoilage,
-        "timestamp":        timestamp.isoformat(),
-    }
-    try:
-        bq.insert_rows_json(BQ_TABLE, [bq_row])
-    except Exception as e:
-        print(f"[BigQuery insert error] {e}")
-
-    # ── FCM alert on high / critical risk ─────────────────────────────
-    if risk_level in ("high", "critical"):
-        alert_doc = {
-            "type":         f"{risk_level}_risk",
-            "severity":     "critical" if risk_level == "critical" else "warning",
-            "message":      (
-                f"Spoilage risk is {risk_level.upper()}! "
-                f"Temp {data['temperature']} °C · Humidity {data['humidity']} % · "
-                f"Est. shelf life {days_to_spoilage} days. "
-                f"{recommendation}"
-            ),
-            "timestamp":    timestamp,
-            "acknowledged": False,
-        }
-        wh_ref.collection("alerts").add(alert_doc)
-
+    # ══════════════════════════════════════════════════════════════
+    # MODE 1: Encrypted batch (AES-128-CBC + protobuf)
+    # ══════════════════════════════════════════════════════════════
+    if is_encrypted:
         try:
-            fcm_msg = messaging.Message(
-                notification=messaging.Notification(
-                    title=f"⚠️ {risk_level.upper()} Spoilage Risk — {commodity.title()}",
-                    body=alert_doc["message"],
-                ),
-                data={
-                    "warehouse_id": warehouse_id,
-                    "risk_level":   risk_level,
-                    "risk_score":   str(risk_score),
-                },
-                topic=f"warehouse_{warehouse_id}",
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        sound="default",
-                        channel_id="spoilage_alerts",
-                    ),
-                ),
-            )
-            messaging.send(fcm_msg)
+            readings_list = _decrypt_batch(data)
+            print(f"[Encrypted] Decrypted {len(readings_list)} readings "
+                  f"for {warehouse_id}/{zone_id}")
         except Exception as e:
-            print(f"[FCM error] {e}")
+            print(f"[Decrypt ERROR] {e}")
+            return ({"error": f"Decryption failed: {str(e)}"}, 400, headers)
 
-    # ── Response ──────────────────────────────────────────────────────
+        if not readings_list:
+            return ({"error": "Decrypted batch is empty"}, 400, headers)
+
+        results = []
+        bq_rows = []
+
+        for i, reading in enumerate(readings_list):
+            reading.setdefault("commodity_type", commodity)
+            reading.setdefault("hours_in_storage", data.get("hours_in_storage", 0))
+
+            if "temperature" not in reading or "humidity" not in reading:
+                results.append({"index": i, "error": "Missing temperature or humidity"})
+                continue
+
+            result = _process_single_reading(
+                reading, warehouse_id, zone_id, commodity, timestamp
+            )
+            result["index"] = i
+            results.append(result)
+
+            bq_rows.append({
+                "warehouse_id":     warehouse_id,
+                "zone_id":          zone_id,
+                "temperature":      reading["temperature"],
+                "humidity":         reading["humidity"],
+                "co2":              reading.get("co2", 400),
+                "gas_level":        reading.get("gas_level", 0),
+                "risk_score":       result["risk_score"],
+                "risk_level":       result["risk_level"],
+                "commodity_type":   commodity,
+                "days_to_spoilage": result["days_to_spoilage"],
+                "timestamp":        timestamp.isoformat(),
+            })
+
+        if bq_rows:
+            try:
+                bq.insert_rows_json(BQ_TABLE, bq_rows)
+            except Exception as e:
+                print(f"[BigQuery batch insert error] {e}")
+
+        successful = [r for r in results if "error" not in r]
+        anomalies_detected = sum(1 for r in successful if r.get("is_anomalous"))
+        _update_warehouse_aggregate(warehouse_id, successful)
+
+        return ({
+            "status":       "ok",
+            "encrypted":    True,
+            "batch_size":   len(readings_list),
+            "processed":    len(successful),
+            "anomalies_detected": anomalies_detected,
+            "zone_id":      zone_id,
+            "warehouse_id": warehouse_id,
+            "results":      results,
+            "timestamp":    timestamp.isoformat(),
+        }, 200, headers)
+
+    # ══════════════════════════════════════════════════════════════
+    # MODE 2: Plaintext batch
+    # ══════════════════════════════════════════════════════════════
+    if is_batch and "readings" in data:
+        readings_list = data["readings"]
+        if not isinstance(readings_list, list) or len(readings_list) == 0:
+            return ({"error": "Batch 'readings' must be a non-empty array."}, 400, headers)
+        if len(readings_list) > 50:
+            return ({"error": "Batch size exceeds maximum of 50."}, 400, headers)
+
+        results = []
+        bq_rows = []
+
+        for i, reading in enumerate(readings_list):
+            reading.setdefault("commodity_type", commodity)
+            reading.setdefault("hours_in_storage", data.get("hours_in_storage", 0))
+
+            if "temperature" not in reading or "humidity" not in reading:
+                results.append({"index": i, "error": "Missing temperature or humidity"})
+                continue
+
+            result = _process_single_reading(
+                reading, warehouse_id, zone_id, commodity, timestamp
+            )
+            result["index"] = i
+            results.append(result)
+
+            bq_rows.append({
+                "warehouse_id":     warehouse_id,
+                "zone_id":          zone_id,
+                "temperature":      reading["temperature"],
+                "humidity":         reading["humidity"],
+                "co2":              reading.get("co2", 400),
+                "gas_level":        reading.get("gas_level", 0),
+                "risk_score":       result["risk_score"],
+                "risk_level":       result["risk_level"],
+                "commodity_type":   commodity,
+                "days_to_spoilage": result["days_to_spoilage"],
+                "timestamp":        timestamp.isoformat(),
+            })
+
+        if bq_rows:
+            try:
+                bq.insert_rows_json(BQ_TABLE, bq_rows)
+            except Exception as e:
+                print(f"[BigQuery batch error] {e}")
+
+        successful = [r for r in results if "error" not in r]
+        anomalies_detected = sum(1 for r in successful if r.get("is_anomalous"))
+        _update_warehouse_aggregate(warehouse_id, successful)
+
+        return ({
+            "status":       "ok",
+            "batch_size":   len(readings_list),
+            "processed":    len(successful),
+            "anomalies_detected": anomalies_detected,
+            "zone_id":      zone_id,
+            "warehouse_id": warehouse_id,
+            "results":      results,
+            "timestamp":    timestamp.isoformat(),
+        }, 200, headers)
+
+    # ══════════════════════════════════════════════════════════════
+    # MODE 3: Single reading (backward compatible)
+    # ══════════════════════════════════════════════════════════════
+    if "temperature" not in data or "humidity" not in data:
+        return ({"error": "Required: temperature, humidity."}, 400, headers)
+
+    result = _process_single_reading(data, warehouse_id, zone_id, commodity, timestamp)
+    _update_warehouse_aggregate(warehouse_id, [result])
+
+    # BigQuery single insert
+    try:
+        bq.insert_rows_json(BQ_TABLE, [{
+            "warehouse_id":     warehouse_id,
+            "zone_id":          zone_id,
+            "temperature":      data["temperature"],
+            "humidity":         data["humidity"],
+            "co2":              data.get("co2", 400),
+            "gas_level":        data.get("gas_level", 0),
+            "risk_score":       result["risk_score"],
+            "risk_level":       result["risk_level"],
+            "commodity_type":   commodity,
+            "days_to_spoilage": result["days_to_spoilage"],
+            "timestamp":        timestamp.isoformat(),
+        }])
+    except Exception as e:
+        print(f"[BigQuery error] {e}")
+
     return (
         {
-            "status":           "ok",
-            "risk_level":       risk_level,
-            "risk_score":       risk_score,
-            "days_to_spoilage": days_to_spoilage,
-            "recommendation":   recommendation,
-            "estimated_loss_inr": estimated_loss,
-            "timestamp":        timestamp.isoformat(),
+            "status":             "ok",
+            "zone_id":            zone_id,
+            "risk_level":         result["risk_level"],
+            "risk_score":         result["risk_score"],
+            "days_to_spoilage":   result["days_to_spoilage"],
+            "recommendation":    result["recommendation"],
+            "estimated_loss_inr": result["estimated_loss_inr"],
+            "is_anomalous":       result["is_anomalous"],
+            "anomaly_score":      result["anomaly_score"],
+            "anomaly_flags":      result["anomaly_flags"],
+            "timestamp":          timestamp.isoformat(),
         },
         200,
         headers,

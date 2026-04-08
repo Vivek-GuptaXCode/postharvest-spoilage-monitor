@@ -27,6 +27,10 @@ void onWarehouseSelected(String? newId) {
 /// Bottom navigation index
 final bottomNavIndexProvider = StateProvider<int>((ref) => 0);
 
+/// Currently selected zone ID within a warehouse.
+/// null = show aggregate / warehouse-level data.
+final selectedZoneIdProvider = StateProvider<String?>((ref) => null);
+
 /// Search query for warehouses
 final warehouseSearchProvider = StateProvider<String>((ref) => '');
 
